@@ -58,7 +58,10 @@ private final class CLIRunner {
                 self.process = nil
                 let data = stdout.fileHandleForReading.readDataToEndOfFile()
                 if let reply = try? JSONDecoder().decode(CLIReply.self, from: data) {
-                    DispatchQueue.main.async { completion(.success(reply)) }
+                    DispatchQueue.main.async {
+                        if reply.ok { completion(.success(reply)) }
+                        else { completion(.failure(AppError.message(reply.error ?? "Monitor operation failed."))) }
+                    }
                 } else {
                     let detail = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                     let message = detail.isEmpty ? "The monitor helper returned invalid data." : detail
@@ -85,6 +88,8 @@ private final class MenuController: NSObject, NSApplicationDelegate {
     private var monitors: [Monitor] = []
     private var selected: Monitor? { didSet { if let selected { UserDefaults.standard.set(selected.id, forKey: "selectedMonitor") }; refreshMenu() } }
     private var currentVolume = 0
+    private var controlError: String?
+    private var volumeKnown = false
     private var muted: Bool?
     private var pendingKeyDelta = 0
     private var keyAdjustmentInFlight = false
@@ -132,6 +137,8 @@ private final class MenuController: NSObject, NSApplicationDelegate {
                 self.monitors = found
                 let saved = UserDefaults.standard.string(forKey: "selectedMonitor")
                 self.selected = found.first(where: { $0.id == saved }) ?? found.first
+                self.currentVolume = self.selected?.volume ?? 0
+                self.volumeKnown = self.selected != nil
                 self.refreshMute()
             } else {
                 self.monitors = []
@@ -147,6 +154,7 @@ private final class MenuController: NSObject, NSApplicationDelegate {
             guard let self, self.selected?.id == monitor.id,
                   case .success(let reply) = result, reply.ok, let value = reply.volume else { return }
             self.currentVolume = value
+            self.volumeKnown = true
             if let max = reply.maxVolume, let index = self.monitors.firstIndex(where: { $0.id == monitor.id }) { self.monitors[index].maxVolume = max; self.monitors[index].volume = value }
             self.refreshMenu()
         }
@@ -176,7 +184,7 @@ private final class MenuController: NSObject, NSApplicationDelegate {
     }
 
     private func flushKeyAdjustment() {
-        guard !keyAdjustmentInFlight, pendingKeyDelta != 0, let monitor = selected else { return }
+        guard volumeKnown, controlError == nil, !keyAdjustmentInFlight, pendingKeyDelta != 0, let monitor = selected else { pendingKeyDelta = 0; return }
         let delta = pendingKeyDelta
         pendingKeyDelta = 0
         let target = max(0, min(monitor.maxVolume, currentVolume + delta))
@@ -207,6 +215,11 @@ private final class MenuController: NSObject, NSApplicationDelegate {
     private func refreshMenu() {
         statusItem.button?.title = selected == nil ? "🔊" : (muted == true ? "🔇" : "🔊 \(volumePercent)%")
         let menu = NSMenu()
+        if let controlError {
+            let errorItem = NSMenuItem(title: controlError, action: nil, keyEquivalent: "")
+            errorItem.isEnabled = false
+            menu.addItem(errorItem)
+        }
         let header = NSMenuItem(title: selected?.name ?? "No LG monitor found", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
@@ -272,11 +285,11 @@ private final class MenuController: NSObject, NSApplicationDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func showError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "LG Monitor Volume"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.runModal()
+        controlError = message
+        pendingKeyDelta = 0
+        volumeKnown = false
+        statusItem.button?.toolTip = message
+        refreshMenu()
     }
 
     private func watchDefaultOutput() {
@@ -287,7 +300,7 @@ private final class MenuController: NSObject, NSApplicationDelegate {
     }
 
     private func isSelectedMonitorDefaultOutput() -> Bool {
-        guard let uid = selected?.audioUID else { return false }
+        guard volumeKnown, controlError == nil, let uid = selected?.audioUID else { return false }
         var address = Self.defaultOutputAddress
         var device = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
