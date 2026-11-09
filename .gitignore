@@ -1,0 +1,17 @@
+.build/
+.DS_Store
+*.app/
+*.dSYM/
+*.xcarchive/
+*.o
+*.d
+*.trace
+*.log
+Diagnostics/
+Diagnostics/*-repro
+Diagnostics/*.bin
+Diagnostics/*.dcp
+Diagnostics/*.raw
+Diagnostics/*.dump
+Diagnostics/extracted/
+Diagnostics/tmp/
